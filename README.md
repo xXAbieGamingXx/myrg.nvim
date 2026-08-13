@@ -12,7 +12,7 @@ A small ripgrep wrapper for Neovim with quick results and is truly asynchronous,
 
 ```lua
 {
-    "xXAbieGaming/myrg.nvim",
+    "xXAbieGamingXx/myrg.nvim",
     config = function()
         require("myrg").setup({
             cmd = "path/to/rg" -- config only required if rg is not globally installed
