@@ -86,27 +86,37 @@ local function run(args, cwd, parse)
 	local output = ""
 	local found_result = false
 	local pending = {}
-	local flush_scheduled = false
 	local opened = false
+	local matches_printed = 0
 
 	local function stale()
 		return gen ~= generation
 	end
 
+	local function chunk_size()
+		return math.max(10, matches_printed)
+	end
+
 	local function flush()
-		flush_scheduled = false
 		if stale() or #pending == 0 then
 			return
 		end
 		if not opened then
-			vim.fn.setqflist({}, 'r', {items = {}, title = ""}) -- empty list
-			vim.cmd("copen")
-			style_qf_window()
+			vim.schedule(function()
+				vim.fn.setqflist({}, 'r', {items = {}, title = ""}) -- empty list
+				vim.cmd("copen")
+				style_qf_window()
+			end)
 			opened = true
 		end
-		vim.fn.setqflist(pending, "a")
+
+		local tmp_pending = pending
 		pending = {}
-		vim.cmd("redraw")
+		vim.schedule(function()
+			vim.fn.setqflist(tmp_pending, "a")
+			vim.cmd("redraw")
+		end)
+		matches_printed = matches_printed + #pending
 	end
 
 	active = vim.system(args, {
@@ -132,16 +142,16 @@ local function run(args, cwd, parse)
 						if item then
 							found_result = true
 							pending[#pending + 1] = item
-							if not flush_scheduled then
-								flush_scheduled = true
-								vim.schedule(flush)
+							if #pending >= chunk_size() then -- stops lag and allows some incremental results
+								flush()
 							end
 						end
 					end
 				end
 			end
 		end,
-	}, function(out)
+	}, function(out) -- exit
+		flush() -- will be in the middle of a chunk
 		if not stale() then
 			active = nil
 		end

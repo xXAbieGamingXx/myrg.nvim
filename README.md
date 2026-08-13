@@ -10,13 +10,13 @@ A small ripgrep wrapper for Neovim with quick results and is truly asynchronous,
 
 ```lua
 {
-    "xXAbieGaming/myrg.nvim",
-    config = function()
-        require("myrg").setup({
-            cmd = "path/to/rg" -- config only required if rg is not globally installed
-        })
-    end,
-    cmd = {"Rg", "Rgcwd", "Rgff"},
+	"xXAbieGaming/myrg.nvim",
+	config = function()
+		require("myrg").setup({
+			cmd = "path/to/rg" -- config only required if rg is not globally installed
+		})
+	end,
+	cmd = {"Rg", "Rgcwd", "Rgff"},
 },
 ```
 
@@ -30,9 +30,21 @@ vim.keymap.set('n', '<leader>ft', function()
 end)
 ```
 
+I would highly recommend disabling Treesitter for the quickfix filetype, it changes nothing about the visuals and adds almost all of the ui lag.
+```lua
+vim.api.nvim_create_autocmd("FileType", {
+	pattern = "qf",
+	callback = function(args)
+		pcall(vim.treesitter.stop, args.buf)
+	end,
+})
+```
+
 ## Commands
 
-A path that is empty will result in choosing cwd, and an unspecified filetype will result in all filetypes being chosen
+All commands will open up a quickfix window with the results.
+
+A path that is empty will result in choosing cwd, and an unspecified filetype will result in all filetypes being chosen.
 
 ### `Rg`
 Specify pattern and path
