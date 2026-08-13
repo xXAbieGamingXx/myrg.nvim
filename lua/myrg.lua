@@ -11,38 +11,195 @@ M.setup = function(args)
 	M.config = vim.tbl_deep_extend("force", M.config, args or {})
 end
 
-M.rg = function(opts, cwd_arg)
-	local cwd = ""
-	if(#cwd_arg == 0) then
-		cwd = vim.fn.getcwd()
-	else
-		cwd = cwd_arg
+local function resolve_cwd(dir)
+	if dir == nil or dir == "" then
+		return vim.fn.getcwd()
+	end
+	return vim.fs.normalize(vim.fn.expand(dir))
+end
+
+local function is_absolute(path)
+	return string.match(path, "^/") ~= nil or string.match(path, "^%a:[/\\]") ~= nil
+end
+
+local function absolute_path(cwd, file)
+	if is_absolute(file) then
+		return vim.fs.normalize(file)
+	end
+	return vim.fs.normalize(vim.fs.joinpath(cwd, file))
+end
+
+local function parse_match(line, cwd)
+	local file, line_number, text = string.match(line, "^(.-):(%d+):(.*)$")
+	if not file then
+		return nil
+	end
+	return {filename = absolute_path(cwd, file), lnum = tonumber(line_number), text = text}
+end
+
+local function parse_file(line, cwd)
+	if line == "" then
+		return nil
+	end
+	return {filename = absolute_path(cwd, line)}
+end
+
+local function ask(questions, done)
+	local answers = {}
+	local function step(i)
+		if i > #questions then
+			done(answers)
+			return
+		end
+		vim.ui.input({prompt = questions[i].prompt}, function(input)
+			if input == nil then
+				return
+			end
+			answers[questions[i].name] = input
+			step(i + 1)
+		end)
+	end
+	step(1)
+end
+
+local qf_statusline = "%{get(w:,'quickfix_title','')}%<%=%-14.(%l,%c%V%) %P" -- remove the [Quickfix List] from the title
+
+local function style_qf_window()
+	for _, win in ipairs(vim.api.nvim_list_wins()) do
+		local info = vim.fn.getwininfo(win)[1]
+		if info.quickfix == 1 and info.loclist == 0 then
+			vim.api.nvim_set_option_value("statusline", qf_statusline, {win = win, scope = "local"})
+		end
+	end
+end
+
+local generation = 0
+local active = nil
+
+local function run(args, cwd, parse)
+	generation = generation + 1
+	local gen = generation
+	if active then
+		pcall(function() active:kill(15) end)
 	end
 
-	args = {M.config.cmd}
+	local output = ""
+	local found_result = false
+	local pending = {}
+	local flush_scheduled = false
+	local opened = false
 
-	for word in string.gmatch(opts.args, "%S+") do
-		table.insert(args, word)
+	local function stale()
+		return gen ~= generation
 	end
 
-	if(#opts.args > 0) then
-		vim.fn.jobstart(args, {
-			stderr_buffered = true,
-			on_stderr = function(job_id, data, event)
-				vim.api.nvim_echo({{data, "ErrorMsg"}}, true, {})
-			end,
-			on_exit = function(job_id, data, event)
-
-			end,
-			on_stdout = function(job_id, data, event)
-				print(data)
-			end,
-			cwd = cwd,
-		})
-
-		local result = vim.fn.system(M.config.cmd.." "..opts.args)
-		print(result)
+	local function flush()
+		flush_scheduled = false
+		if stale() or #pending == 0 then
+			return
+		end
+		if not opened then
+			vim.fn.setqflist({}, 'r', {items = {}, title = ""}) -- empty list
+			vim.cmd("copen")
+			style_qf_window()
+			opened = true
+		end
+		vim.fn.setqflist(pending, "a")
+		pending = {}
+		vim.cmd("redraw")
 	end
+
+	active = vim.system(args, {
+		text = true,
+		cwd = cwd,
+		stderr = function(job_id, data, event)
+			if data and not stale() then
+				vim.schedule(function()
+					vim.api.nvim_echo({{data, "ErrorMsg"}}, true, {})
+				end)
+			end
+		end,
+		stdout = function(job_id, data, event)
+			if data and not stale() then
+				output = output..data
+				local location = 0
+				while location do
+					location = string.find(output, "\n", 1, true)
+					if location then
+						local line = string.gsub(string.sub(output, 1, location - 1), "\r$", "")
+						output = string.sub(output, location + 1)
+						local item = parse(line, cwd)
+						if item then
+							found_result = true
+							pending[#pending + 1] = item
+							if not flush_scheduled then
+								flush_scheduled = true
+								vim.schedule(flush)
+							end
+						end
+					end
+				end
+			end
+		end,
+	}, function(out)
+		if not stale() then
+			active = nil
+		end
+		if not found_result and not stale() then
+			vim.schedule(function()
+				vim.fn.setqflist({}, 'r', {items = {}}) -- empty list
+				vim.api.nvim_echo({{"No results were found", "WarningMsg"}}, true, {})
+			end)
+		end
+	end)
+end
+
+M.rg = function()
+	ask({
+		{name = "pattern", prompt = "Search Pattern: "},
+		{name = "dir", prompt = "Search Directory: "},
+	}, function(answers)
+		if answers.pattern == "" then
+			return
+		end
+		local cwd = resolve_cwd(answers.dir)
+		local args = {M.config.cmd, "--no-heading", "--color=never", "--line-number", "--", answers.pattern}
+		run(args, cwd, parse_match)
+	end)
+end
+
+M.rgcwd = function(cwd_arg)
+	local cwd = resolve_cwd(cwd_arg)
+
+	ask({
+		{name = "pattern", prompt = "Search Pattern: "},
+	}, function(answers)
+		if answers.pattern == "" then
+			return
+		end
+		local args = {M.config.cmd, "--no-heading", "--color=never", "--line-number", "--", answers.pattern}
+		run(args, cwd, parse_match)
+	end)
+end
+
+M.rgff = function()
+	ask({
+		{name = "pattern", prompt = "File Pattern: "},
+		{name = "ftype", prompt = "File Type: "},
+		{name = "dir", prompt = "File Directory: "},
+	}, function(answers)
+		local cwd = resolve_cwd(answers.dir)
+		local args = {M.config.cmd, "--no-heading", "--color=never", "--files"}
+		if answers.pattern ~= "" then
+			table.insert(args, "-g")
+			table.insert(args, "*"..answers.pattern.."*")
+		end
+		if answers.ftype ~= "" then
+			table.insert(args, "-t")
+			table.insert(args, answers.ftype)
+		end
+		run(args, cwd, parse_file)
+	end)
 end
 
 return M
