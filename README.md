@@ -2,7 +2,7 @@
 # myrg.nvim
 A small ripgrep wrapper for Neovim with quick results and is truly asynchronous, updating the quickfixes when ripgrep finds matches.
 
-<img width="2548" height="1432" alt="demo" src="https://github.com/user-attachments/assets/56ad3cbe-ad01-494f-9beb-4d459d5ac851" />
+<img width="2560" height="1440" alt="demo" src="https://github.com/user-attachments/assets/bed3c00a-4149-4688-8723-da2c8a2c22e6" />
 
 ## Requirements
  - Neovim 0.10+
