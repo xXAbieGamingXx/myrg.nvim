@@ -1,6 +1,8 @@
+
 # myrg.nvim
 A small ripgrep wrapper for Neovim with quick results and is truly asynchronous, updating the quickfixes when ripgrep finds matches.
 
+<img width="2548" height="1432" alt="demo" src="https://github.com/user-attachments/assets/56ad3cbe-ad01-494f-9beb-4d459d5ac851" />
 
 ## Requirements
  - Neovim 0.10+
@@ -10,13 +12,13 @@ A small ripgrep wrapper for Neovim with quick results and is truly asynchronous,
 
 ```lua
 {
-	"xXAbieGaming/myrg.nvim",
-	config = function()
-		require("myrg").setup({
-			cmd = "path/to/rg" -- config only required if rg is not globally installed
-		})
-	end,
-	cmd = {"Rg", "Rgcwd", "Rgff"},
+    "xXAbieGamingXx/myrg.nvim",
+    config = function()
+        require("myrg").setup({
+            cmd = "path/to/rg" -- config only required if rg is not globally installed
+        })
+    end,
+    cmd = {"Rg", "Rgcwd", "Rgff"},
 },
 ```
 
