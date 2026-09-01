@@ -48,6 +48,8 @@ All commands will open up a quickfix window with the results.
 
 A path that is empty will result in choosing cwd, and an unspecified filetype will result in all filetypes being chosen.
 
+Matches that are a definition are put at the start of the list.
+
 ### `Rg`
 Specify pattern and path
 

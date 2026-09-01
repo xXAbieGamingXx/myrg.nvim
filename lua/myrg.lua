@@ -18,6 +18,19 @@ local function resolve_cwd(dir)
 	return vim.fs.normalize(vim.fn.expand(dir))
 end
 
+local function verify_cwd(cwd)
+	local stat = vim.uv.fs_stat(cwd)
+	if not stat then
+		vim.api.nvim_echo({{"Directory does not exist: "..cwd, "WarningMsg"}}, true, {})
+		return false
+	end
+	if stat.type ~= "directory" then
+		vim.api.nvim_echo({{"Not a directory: "..cwd, "WarningMsg"}}, true, {})
+		return false
+	end
+	return true
+end
+
 local function is_absolute(path)
 	return string.match(path, "^/") ~= nil or string.match(path, "^%a:[/\\]") ~= nil
 end
@@ -62,8 +75,6 @@ local function ask(questions, done)
 	step(1)
 end
 
-local qf_statusline = "%{get(w:,'quickfix_title','')}%<%=%-14.(%l,%c%V%) %P" -- remove the [Quickfix List] from the title
-
 local function style_qf_window()
 	for _, win in ipairs(vim.api.nvim_list_wins()) do
 		local info = vim.fn.getwininfo(win)[1]
@@ -76,7 +87,11 @@ end
 local generation = 0
 local active = nil
 
-local function run(args, cwd, parse)
+local function run(args, cwd, parse, pattern)
+	if not verify_cwd(cwd) then
+		return
+	end
+
 	generation = generation + 1
 	local gen = generation
 	if active then
@@ -85,38 +100,107 @@ local function run(args, cwd, parse)
 
 	local output = ""
 	local found_result = false
-	local pending = {}
 	local opened = false
-	local matches_printed = 0
+	local qflist = {}
+	local ndefs = 0 -- defs at start of list
+	local written = 0
+	local dirty = false -- must replace next sync
 
 	local function stale()
 		return gen ~= generation
 	end
 
 	local function chunk_size()
-		return math.max(10, matches_printed)
+		return math.max(10, written)
 	end
 
-	local function flush()
-		if stale() or #pending == 0 then
+	local function sync()
+		if stale() then
 			return
 		end
-		if not opened then
-			vim.schedule(function()
-				vim.fn.setqflist({}, 'r', {items = {}, title = ""}) -- empty list
-				vim.cmd("copen")
-				style_qf_window()
-			end)
-			opened = true
+		local replace = dirty or not opened
+		if not replace and #qflist == written then
+			return
 		end
 
-		local tmp_pending = pending
-		pending = {}
+		local items = replace and vim.list_slice(qflist, 1, #qflist)
+			or vim.list_slice(qflist, written + 1, #qflist)
+		local first = not opened
+
+		dirty = false
+		written = #qflist
+		opened = true
+
 		vim.schedule(function()
-			vim.fn.setqflist(tmp_pending, "a")
+			if stale() then
+				return
+			end
+			if replace then
+				vim.fn.setqflist({}, "r", {items = items, title = ""})
+			else
+				vim.fn.setqflist(items, "a")
+			end
+			if first then
+				vim.cmd("copen")
+				style_qf_window()
+			end
 			vim.cmd("redraw")
 		end)
-		matches_printed = matches_printed + #pending
+	end
+
+	local function test_definition(line)
+		if not pattern or pattern == "" or type(line) ~= "string" then
+			return false
+		end
+
+		if (string.gsub(line, "[ \t]+", "")) == "}"..pattern..";" then
+			return true
+		end
+
+		local stripped = string.match(line, "^([^(]+)") -- everything before the first (
+		if not stripped then
+			return false
+		end
+
+		if string.find(stripped, "=", 1, true) then -- an = before ( means assignment
+			return false
+		end
+
+		local words = {}
+		for word in string.gmatch(stripped, "%S+") do
+			words[#words + 1] = word
+		end
+
+		if words[1] == "if" or words[1] == "else" or words[1] == "elif" then
+			return false
+		end
+
+		for i = 2, #words do -- must be preceded by a type/keyword
+			if words[i] == pattern then
+				return true
+			end
+		end
+
+		return false
+	end
+
+	local function consume(line)
+		local item = parse(line, cwd)
+		if not item then
+			return
+		end
+		found_result = true
+		if test_definition(item.text) then
+			ndefs = ndefs + 1
+			table.insert(qflist, ndefs, item)
+			dirty = true
+			sync()
+		else
+			qflist[#qflist + 1] = item
+			if #qflist - written >= chunk_size() then -- incremental results without the lag
+				sync()
+			end
+		end
 	end
 
 	active = vim.system(args, {
@@ -132,27 +216,24 @@ local function run(args, cwd, parse)
 		stdout = function(job_id, data, event)
 			if data and not stale() then
 				output = output..data
-				local location = 0
-				while location do
-					location = string.find(output, "\n", 1, true)
-					if location then
-						local line = string.gsub(string.sub(output, 1, location - 1), "\r$", "")
-						output = string.sub(output, location + 1)
-						local item = parse(line, cwd)
-						if item then
-							found_result = true
-							pending[#pending + 1] = item
-							if #pending >= chunk_size() then -- stops lag and allows some incremental results
-								flush()
-							end
-						end
+				while true do
+					local location = string.find(output, "\n", 1, true)
+					if not location then
+						break
 					end
+					local line = string.gsub(string.sub(output, 1, location - 1), "\r$", "")
+					output = string.sub(output, location + 1)
+					consume(line)
 				end
 			end
 		end,
 	}, function(out) -- exit
-		flush() -- will be in the middle of a chunk
 		if not stale() then
+			if output ~= "" then -- last line had no trailing newline
+				consume((string.gsub(output, "\r$", "")))
+				output = ""
+			end
+			sync() -- will be in the middle of a chunk
 			active = nil
 		end
 		if not found_result and not stale() then
@@ -174,12 +255,15 @@ M.rg = function()
 		end
 		local cwd = resolve_cwd(answers.dir)
 		local args = {M.config.cmd, "--no-heading", "--color=never", "--line-number", "--", answers.pattern}
-		run(args, cwd, parse_match)
+		run(args, cwd, parse_match, answers.pattern)
 	end)
 end
 
 M.rgcwd = function(cwd_arg)
 	local cwd = resolve_cwd(cwd_arg)
+	if not verify_cwd(cwd) then
+		return
+	end
 
 	ask({
 		{name = "pattern", prompt = "Search Pattern: "},
@@ -188,7 +272,7 @@ M.rgcwd = function(cwd_arg)
 			return
 		end
 		local args = {M.config.cmd, "--no-heading", "--color=never", "--line-number", "--", answers.pattern}
-		run(args, cwd, parse_match)
+		run(args, cwd, parse_match, answers.pattern)
 	end)
 end
 
