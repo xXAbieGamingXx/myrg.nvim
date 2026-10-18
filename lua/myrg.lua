@@ -13,7 +13,7 @@ end
 
 local function resolve_cwd(dir)
 	if dir == nil or dir == "" then
-		return vim.fn.getcwd()
+		return vim.fs.normalize(vim.fn.getcwd())
 	end
 	return vim.fs.normalize(vim.fn.expand(dir))
 end
@@ -35,9 +35,19 @@ local function is_absolute(path)
 	return string.match(path, "^/") ~= nil or string.match(path, "^%a:[/\\]") ~= nil
 end
 
+local function needs_normalize(file)
+	return string.find(file, "\\", 1, true) ~= nil
+		or string.find(file, "//", 1, true) ~= nil
+		or string.find("/"..file.."/", "/%.%.?/") ~= nil -- . or .. segment
+end
+
 local function absolute_path(cwd, file)
 	if is_absolute(file) then
 		return vim.fs.normalize(file)
+	end
+	if not needs_normalize(file) then -- rg paths are usually fine
+		local sep = string.sub(cwd, -1) == "/" and "" or "/"
+		return cwd..sep..file
 	end
 	return vim.fs.normalize(vim.fs.joinpath(cwd, file))
 end
@@ -75,15 +85,6 @@ local function ask(questions, done)
 	step(1)
 end
 
-local function style_qf_window()
-	for _, win in ipairs(vim.api.nvim_list_wins()) do
-		local info = vim.fn.getwininfo(win)[1]
-		if info.quickfix == 1 and info.loclist == 0 then
-			vim.api.nvim_set_option_value("statusline", qf_statusline, {win = win, scope = "local"})
-		end
-	end
-end
-
 local generation = 0
 local active = nil
 
@@ -104,7 +105,9 @@ local function run(args, cwd, parse, pattern)
 	local qflist = {}
 	local ndefs = 0 -- defs at start of list
 	local written = 0
-	local dirty = false -- must replace next sync
+	local dirty = false -- replace next sync
+	local written_defs = 0 -- ndefs as of the last write
+	local pending = false -- a flush is scheduled
 
 	local function stale()
 		return gen ~= generation
@@ -114,7 +117,8 @@ local function run(args, cwd, parse, pattern)
 		return math.max(10, written)
 	end
 
-	local function sync()
+	local function flush()
+		pending = false
 		if stale() then
 			return
 		end
@@ -122,30 +126,39 @@ local function run(args, cwd, parse, pattern)
 		if not replace and #qflist == written then
 			return
 		end
-
-		local items = replace and vim.list_slice(qflist, 1, #qflist)
-			or vim.list_slice(qflist, written + 1, #qflist)
 		local first = not opened
+
+		if replace then
+			local what = {items = qflist, title = ""}
+			if not first then
+				local idx = vim.fn.getqflist({idx = 0}).idx
+				if idx > written_defs then
+					idx = idx + ndefs - written_defs
+				end
+				what.idx = idx
+			end
+			vim.fn.setqflist({}, "r", what)
+		else
+			vim.fn.setqflist(vim.list_slice(qflist, written + 1, #qflist), "a")
+		end
 
 		dirty = false
 		written = #qflist
+		written_defs = ndefs
 		opened = true
 
-		vim.schedule(function()
-			if stale() then
-				return
-			end
-			if replace then
-				vim.fn.setqflist({}, "r", {items = items, title = ""})
-			else
-				vim.fn.setqflist(items, "a")
-			end
-			if first then
-				vim.cmd("copen")
-				style_qf_window()
-			end
-			vim.cmd("redraw")
-		end)
+		if first then
+			vim.cmd("copen")
+		end
+		vim.cmd("redraw")
+	end
+
+	local function sync()
+		if pending or stale() then
+			return
+		end
+		pending = true
+		vim.schedule(flush)
 	end
 
 	local function test_definition(line)
@@ -194,12 +207,11 @@ local function run(args, cwd, parse, pattern)
 			ndefs = ndefs + 1
 			table.insert(qflist, ndefs, item)
 			dirty = true
-			sync()
 		else
 			qflist[#qflist + 1] = item
-			if #qflist - written >= chunk_size() then -- incremental results without the lag
-				sync()
-			end
+		end
+		if #qflist - written >= chunk_size() then -- incremental results without the lag
+			sync()
 		end
 	end
 
@@ -216,15 +228,17 @@ local function run(args, cwd, parse, pattern)
 		stdout = function(job_id, data, event)
 			if data and not stale() then
 				output = output..data
+				local start = 1
 				while true do
-					local location = string.find(output, "\n", 1, true)
+					local location = string.find(output, "\n", start, true)
 					if not location then
 						break
 					end
-					local line = string.gsub(string.sub(output, 1, location - 1), "\r$", "")
-					output = string.sub(output, location + 1)
+					local line = string.gsub(string.sub(output, start, location - 1), "\r$", "")
+					start = location + 1
 					consume(line)
 				end
+				output = string.sub(output, start)
 			end
 		end,
 	}, function(out) -- exit
